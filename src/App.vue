@@ -265,6 +265,9 @@
                 </tbody>
               </table>
             </div>
+
+            <!-- 流程图 -->
+            <FlowChart :activeLines="activeLines" :results="results" />
           </div>
         </section>
       </div>
@@ -299,6 +302,85 @@
           </table>
         </section>
       </div>
+
+      <!-- Tab: 优化 -->
+      <div v-if="currentTab === 'optimize'" class="tab-content tab-optimize">
+        <section class="panel-center">
+          <h3 class="page-title">⚡ 产线优化</h3>
+          <p class="page-subtitle">基于线性规划，在原料限制下最大化调度券产出</p>
+
+          <!-- Raw Limits Input -->
+          <div class="optimize-limits">
+            <h4 class="section-title">📌 原料上限（约束条件）</h4>
+            <div class="limits-grid">
+              <div v-for="(val, res) in optimizeLimits" :key="res" class="limit-item">
+                <span>{{ res }}</span>
+                <input v-model.number="optimizeLimits[res]" type="number" min="0" class="input limit-input" />
+                <button class="btn-icon sm" @click="delete optimizeLimits[res]">✕</button>
+              </div>
+            </div>
+            <div class="add-limit-form">
+              <select v-model="newOptLimitRes" class="select">
+                <option value="">选择原料...</option>
+                <option v-for="r in rawResources" :key="r" :value="r">{{ r }}</option>
+              </select>
+              <input v-model.number="newOptLimitVal" type="number" min="0" class="input limit-input" placeholder="上限/分" />
+              <button class="btn btn-secondary" @click="addOptLimit" :disabled="!newOptLimitRes">设置</button>
+            </div>
+          </div>
+
+          <!-- Optimize Button -->
+          <button class="btn btn-calculate" @click="runOptimize" :disabled="isOptimizing">
+            {{ isOptimizing ? '🔄 优化中...' : '⚡ 开始优化' }}
+          </button>
+
+          <!-- Results -->
+          <div v-if="optimizeResult" class="optimize-result">
+            <div class="result-cards">
+              <div class="result-card card-dispatch">
+                <div class="card-label">🎫 优化调度券产出</div>
+                <div class="card-value">{{ formatNum(optimizeResult.dispatchPerMin) }}/分</div>
+                <div class="card-sub">{{ formatNum(optimizeResult.dispatchPerHour) }}/时 · {{ formatNum(optimizeResult.dispatchPerDay) }}/天</div>
+                <div class="card-sub" style="margin-top:4px">状态: {{ optimizeResult.status }} | 求解时间: {{ optimizeResult.solveTimeMs }}ms</div>
+              </div>
+            </div>
+
+            <div v-if="optimizeResult.lines.length > 0">
+              <h4 class="section-title">🏭 最优产线配置</h4>
+              <table class="result-table">
+                <thead>
+                  <tr>
+                    <th>配方</th>
+                    <th>设备</th>
+                    <th>产出产品</th>
+                    <th>机器数</th>
+                    <th>产出/分</th>
+                    <th>调度券/分</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(line, idx) in optimizeResult.lines" :key="idx">
+                    <td>{{ line.name }}</td>
+                    <td>{{ line.machine }}</td>
+                    <td>{{ line.product }}</td>
+                    <td class="val-num">{{ line.machineCount.toFixed(2) }}</td>
+                    <td class="val-num">{{ line.outputPerMin.toFixed(2) }}</td>
+                    <td class="val-cell">{{ formatNum(line.dispatchPerMin) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <button class="btn btn-secondary" style="margin-top:12px" @click="loadOptimizedLines">
+                📋 导入到计算器
+              </button>
+            </div>
+
+            <div v-else-if="optimizeResult.status !== 'OPTIMAL' && optimizeResult.status !== 'FEASIBLE'" class="alert alert-danger">
+              求解失败: {{ optimizeResult.status }} - 请检查约束条件是否合理
+            </div>
+          </div>
+        </section>
+      </div>
     </main>
 
     <footer class="footer">
@@ -311,13 +393,16 @@
 import { ref, reactive, computed } from 'vue'
 import { RECIPES, PRESETS, DISPATCH_VALUE, POWER_GEN, PRODUCT_VARIANTS, RECIPE_MAP } from './data/recipes.js'
 import { calculate as calcEngine, createLine, autoExpandUpstream } from './CalculatorEngine.js'
+import { optimizeDispatch } from './LPOptimizer.js'
 import RecipeBrowser from './components/RecipeBrowser.vue'
+import FlowChart from './components/FlowChart.vue'
 
 // Navigation
 const tabs = [
   { id: 'calc', label: '计算器', icon: '🧮' },
   { id: 'recipes', label: '配方查看', icon: '📖' },
   { id: 'dispatch', label: '调度券', icon: '🎫' },
+  { id: 'optimize', label: '🎯 优化', icon: '⚡' },
 ]
 const currentTab = ref('calc')
 
@@ -343,6 +428,13 @@ const newLineCount = ref(1)
 const newLineEff = ref(1.0)
 const newLimitRes = ref('')
 const newLimitVal = ref(10)
+
+// Optimize tab state
+const optimizeLimits = reactive({})
+const newOptLimitRes = ref('')
+const newOptLimitVal = ref(10)
+const isOptimizing = ref(false)
+const optimizeResult = ref(null)
 
 // Recipe variant selection state
 const selectedVariantId = ref('')
@@ -497,6 +589,49 @@ function formatNum(n) {
   if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M'
   if (n >= 1000) return (n / 1000).toFixed(1) + 'K'
   return n.toFixed(0)
+}
+
+// ── Optimize tab methods ──────────────────────────────────────────────
+function addOptLimit() {
+  if (!newOptLimitRes.value) return
+  optimizeLimits[newOptLimitRes.value] = newOptLimitVal.value || 0
+  newOptLimitRes.value = ''
+  newOptLimitVal.value = 10
+}
+
+async function runOptimize() {
+  isOptimizing.value = true
+  optimizeResult.value = null
+  try {
+    const result = await optimizeDispatch(optimizeLimits, {})
+    optimizeResult.value = result
+  } catch (e) {
+    console.error('Optimization failed:', e)
+    optimizeResult.value = { status: 'ERROR: ' + e.message, dispatchPerMin: 0, lines: [], solveTimeMs: 0 }
+  } finally {
+    isOptimizing.value = false
+  }
+}
+
+function loadOptimizedLines() {
+  if (!optimizeResult.value?.lines) return
+  clearAllLines()
+  // Clear power sources
+  for (const k of Object.keys(selectedPower)) {
+    selectedPower[k] = 0
+  }
+  // Clear limits
+  for (const k of Object.keys(rawLimits)) {
+    delete rawLimits[k]
+  }
+
+  for (const line of optimizeResult.value.lines) {
+    const l = createLine(line.recipeId, Math.ceil(line.machineCount), 1.0)
+    if (l) activeLines.value.push(l)
+  }
+
+  currentTab.value = 'calc'
+  currentPreset.value = ''
 }
 </script>
 
@@ -1035,5 +1170,29 @@ body {
 
   /* Main bottom padding for nav bar */
   .main { padding-bottom: 0; }
+}
+
+/* Tab Optimize */
+.tab-optimize .panel-center {
+  max-width: 900px;
+}
+
+.optimize-limits {
+  background: var(--surface2);
+  border-radius: 10px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  margin-bottom: 16px;
+}
+
+.optimize-result {
+  margin-top: 20px;
+}
+
+.optimize-result .section-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 10px;
 }
 </style>
