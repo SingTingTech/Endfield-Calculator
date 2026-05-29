@@ -140,7 +140,7 @@ function createTables() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       recipe_id INTEGER NOT NULL,
       product_id INTEGER NOT NULL,
-      amount INTEGER NOT NULL DEFAULT 1,
+      amount_per_min REAL NOT NULL,
       output_type TEXT NOT NULL DEFAULT 'main',
       FOREIGN KEY (recipe_id) REFERENCES recipes(id),
       FOREIGN KEY (product_id) REFERENCES products(id)
@@ -152,7 +152,7 @@ function createTables() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       recipe_id INTEGER NOT NULL,
       product_id INTEGER NOT NULL,
-      amount INTEGER NOT NULL,
+      amount_per_min REAL NOT NULL,
       FOREIGN KEY (recipe_id) REFERENCES recipes(id),
       FOREIGN KEY (product_id) REFERENCES products(id)
     )
@@ -235,6 +235,9 @@ function seedData() {
     const machineId = machineMap[r.machine]
     if (!machineId) continue
 
+    // 每分钟批次数 = 60 / time
+    const batchesPerMin = r.time > 0 ? 60 / r.time : 0
+
     let recipeDbId = null
     const existing = db.exec(
       `SELECT id FROM recipes WHERE recipe_id = '${safe(r.id)}'`
@@ -257,35 +260,35 @@ function seedData() {
 
     if (!recipeDbId) continue
 
-    // 主产物
+    // 主产物：每分钟产出量
     const mainProductId = productMap[r.product]
     if (mainProductId) {
       db.run(`
-        INSERT INTO recipe_products (recipe_id, product_id, amount, output_type)
-        VALUES (?, ?, 1, 'main')`,
-        [recipeDbId, mainProductId]
+        INSERT INTO recipe_products (recipe_id, product_id, amount_per_min, output_type)
+        VALUES (?, ?, ?, 'main')`,
+        [recipeDbId, mainProductId, r.productPerMin]
       )
     }
 
-    // 副产物（secondaryOutput）
+    // 副产物：每分钟产出量
     if (r.secondaryOutput) {
       const secProductId = productMap[r.secondaryOutput]
       if (secProductId) {
         db.run(`
-          INSERT INTO recipe_products (recipe_id, product_id, amount, output_type)
-          VALUES (?, ?, 1, 'secondary')`,
-          [recipeDbId, secProductId]
+          INSERT INTO recipe_products (recipe_id, product_id, amount_per_min, output_type)
+          VALUES (?, ?, ?, 'secondary')`,
+          [recipeDbId, secProductId, r.productPerMin]
         )
       }
     }
 
-    // 原料
-    for (const [prodName, amount] of Object.entries(r.inputs || {})) {
+    // 原料：每分钟消耗量 = 批消耗量 × 每分钟批次数
+    for (const [prodName, batchAmount] of Object.entries(r.inputs || {})) {
       const inputProdId = productMap[prodName]
       if (inputProdId) {
         db.run(
-          `INSERT INTO recipe_inputs (recipe_id, product_id, amount) VALUES (?, ?, ?)`,
-          [recipeDbId, inputProdId, amount]
+          `INSERT INTO recipe_inputs (recipe_id, product_id, amount_per_min) VALUES (?, ?, ?)`,
+          [recipeDbId, inputProdId, batchAmount * batchesPerMin]
         )
       }
     }
@@ -294,7 +297,7 @@ function seedData() {
 
 function getRecipeInputs(recipeDbId) {
   const result = db.exec(`
-    SELECT pr.name, ri.amount
+    SELECT pr.name, ri.amount_per_min
     FROM recipe_inputs ri
     JOIN products pr ON ri.product_id = pr.id
     WHERE ri.recipe_id = ${recipeDbId}
@@ -310,7 +313,7 @@ function getRecipeInputs(recipeDbId) {
 
 function getRecipeOutputs(recipeDbId) {
   const result = db.exec(`
-    SELECT pr.name, rp.amount, rp.output_type
+    SELECT pr.name, rp.amount_per_min, rp.output_type
     FROM recipe_products rp
     JOIN products pr ON rp.product_id = pr.id
     WHERE rp.recipe_id = ${recipeDbId}
