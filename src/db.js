@@ -26,35 +26,11 @@ export async function initDB() {
   return db
 }
 
-export function getRecipesByMachine(machineName) {
-  const result = db.exec(`
-    SELECT r.recipe_id, r.name, p.name, r.product_per_min, r.time, r.category
-    FROM recipes r
-    JOIN machines m ON r.machine_id = m.id
-    JOIN products p ON r.product_id = p.id
-    WHERE m.name = '${safe(machineName)}'
-  `)
-
-  if (!result.length || !result[0].values.length) return []
-
-  return result[0].values.map(row => ({
-    recipe_id: row[0],
-    name: row[1],
-    product: row[2],
-    productPerMin: row[3],
-    time: row[4],
-    category: row[5]
-  }))
-}
-
 export function getAllRecipesWithInputs() {
   const result = db.exec(`
-    SELECT r.id, r.recipe_id, r.name, m.name as machine,
-           p.name as product, r.product_per_min, r.time,
-           r.category, r.secondary_output
+    SELECT r.id, r.recipe_id, r.name, m.name as machine, r.time, r.category
     FROM recipes r
     JOIN machines m ON r.machine_id = m.id
-    JOIN products p ON r.product_id = p.id
   `)
 
   if (!result.length) return []
@@ -62,34 +38,49 @@ export function getAllRecipesWithInputs() {
   return result[0].values.map(row => {
     const recipeDbId = row[0]
     const inputs = getRecipeInputs(recipeDbId)
+    const outputs = getRecipeOutputs(recipeDbId)
     return {
       id: row[1],
       name: row[2],
       machine: row[3],
-      product: row[4],
-      productPerMin: row[5],
-      time: row[6],
-      category: row[7],
-      secondaryOutput: row[8],
-      inputs
+      time: row[4],
+      category: row[5],
+      inputs,
+      outputs
     }
   })
+}
+
+export function getRecipesByMachine(machineName) {
+  const result = db.exec(`
+    SELECT r.recipe_id, r.name, r.time, r.category
+    FROM recipes r
+    JOIN machines m ON r.machine_id = m.id
+    WHERE m.name = '${safe(machineName)}'
+  `)
+
+  if (!result.length || !result[0].values.length) return []
+
+  return result[0].values.map(row => ({
+    id: row[0], name: row[1], time: row[2], category: row[3]
+  }))
 }
 
 export function searchRecipes(keyword) {
   const kw = safe(keyword)
   const result = db.exec(`
-    SELECT r.recipe_id, r.name, m.name, p.name, r.product_per_min, r.time
+    SELECT r.recipe_id, r.name, m.name, r.time
     FROM recipes r
     JOIN machines m ON r.machine_id = m.id
-    JOIN products p ON r.product_id = p.id
+    JOIN recipe_products rp ON rp.recipe_id = r.id
+    JOIN products p ON p.id = rp.product_id
     WHERE r.name LIKE '%${kw}%' OR p.name LIKE '%${kw}%'
+    GROUP BY r.id
   `)
 
   if (!result.length) return []
   return result[0].values.map(row => ({
-    recipe_id: row[0], name: row[1], machine: row[2],
-    product: row[3], productPerMin: row[4], time: row[5]
+    id: row[0], name: row[1], machine: row[2], time: row[3]
   }))
 }
 
@@ -110,11 +101,6 @@ export function loadPresets() {
     power: JSON.parse(row[2] || '{}'),
     lines: JSON.parse(row[3] || '[]')
   }))
-}
-
-export function getMachineName(id) {
-  const r = db.exec(`SELECT name FROM machines WHERE id = ${id}`)
-  return r.length && r[0].values.length ? r[0].values[0][0] : null
 }
 
 // ----- 内部方法 -----
@@ -143,12 +129,20 @@ function createTables() {
       recipe_id TEXT NOT NULL UNIQUE,
       name TEXT NOT NULL,
       machine_id INTEGER NOT NULL,
-      product_id INTEGER NOT NULL,
-      product_per_min REAL NOT NULL,
       time INTEGER NOT NULL,
       category TEXT,
-      secondary_output TEXT,
-      FOREIGN KEY (machine_id) REFERENCES machines(id),
+      FOREIGN KEY (machine_id) REFERENCES machines(id)
+    )
+  `)
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS recipe_products (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      recipe_id INTEGER NOT NULL,
+      product_id INTEGER NOT NULL,
+      amount INTEGER NOT NULL DEFAULT 1,
+      output_type TEXT NOT NULL DEFAULT 'main',
+      FOREIGN KEY (recipe_id) REFERENCES recipes(id),
       FOREIGN KEY (product_id) REFERENCES products(id)
     )
   `)
@@ -176,7 +170,6 @@ function createTables() {
 }
 
 function seedData() {
-  // 检查是否已初始化
   const count = db.exec('SELECT COUNT(*) FROM machines')
   if (count.length && count[0].values[0][0] > 0) return
 
@@ -237,45 +230,62 @@ function seedData() {
     if (r.length) productMap[name] = r[0].values[0][0]
   }
 
-  // 插入配方
+  // 插入配方及产物
   for (const r of RECIPES) {
     const machineId = machineMap[r.machine]
-    const productId = productMap[r.product]
-    if (!machineId || !productId) continue
+    if (!machineId) continue
 
-    // 先获取已有 recipe_id 对应的 db id
-    let existingId = null
+    let recipeDbId = null
     const existing = db.exec(
       `SELECT id FROM recipes WHERE recipe_id = '${safe(r.id)}'`
     )
     if (existing.length && existing[0].values.length) {
-      existingId = existing[0].values[0][0]
-    }
-
-    if (!existingId) {
+      recipeDbId = existing[0].values[0][0]
+      db.run(`DELETE FROM recipe_products WHERE recipe_id = ${recipeDbId}`)
+      db.run(`DELETE FROM recipe_inputs WHERE recipe_id = ${recipeDbId}`)
+    } else {
       db.run(`
-        INSERT INTO recipes
-          (recipe_id, name, machine_id, product_id, product_per_min, time, category, secondary_output)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [r.id, r.name, machineId, productId, r.productPerMin, r.time, r.category, r.secondaryOutput || null]
+        INSERT INTO recipes (recipe_id, name, machine_id, time, category)
+        VALUES (?, ?, ?, ?, ?)`,
+        [r.id, r.name, machineId, r.time, r.category]
       )
       const idResult = db.exec(
         `SELECT id FROM recipes WHERE recipe_id = '${safe(r.id)}'`
       )
-      if (idResult.length) existingId = idResult[0].values[0][0]
+      if (idResult.length) recipeDbId = idResult[0].values[0][0]
     }
 
-    if (!existingId) continue
+    if (!recipeDbId) continue
 
-    // 插入原料（先清除旧的）
-    db.run(`DELETE FROM recipe_inputs WHERE recipe_id = ${existingId}`)
+    // 主产物
+    const mainProductId = productMap[r.product]
+    if (mainProductId) {
+      db.run(`
+        INSERT INTO recipe_products (recipe_id, product_id, amount, output_type)
+        VALUES (?, ?, 1, 'main')`,
+        [recipeDbId, mainProductId]
+      )
+    }
 
+    // 副产物（secondaryOutput）
+    if (r.secondaryOutput) {
+      const secProductId = productMap[r.secondaryOutput]
+      if (secProductId) {
+        db.run(`
+          INSERT INTO recipe_products (recipe_id, product_id, amount, output_type)
+          VALUES (?, ?, 1, 'secondary')`,
+          [recipeDbId, secProductId]
+        )
+      }
+    }
+
+    // 原料
     for (const [prodName, amount] of Object.entries(r.inputs || {})) {
       const inputProdId = productMap[prodName]
       if (inputProdId) {
         db.run(
           `INSERT INTO recipe_inputs (recipe_id, product_id, amount) VALUES (?, ?, ?)`,
-          [existingId, inputProdId, amount]
+          [recipeDbId, inputProdId, amount]
         )
       }
     }
@@ -298,7 +308,27 @@ function getRecipeInputs(recipeDbId) {
   return inputs
 }
 
-// SQL 注入防护（简单转义）
+function getRecipeOutputs(recipeDbId) {
+  const result = db.exec(`
+    SELECT pr.name, rp.amount, rp.output_type
+    FROM recipe_products rp
+    JOIN products pr ON rp.product_id = pr.id
+    WHERE rp.recipe_id = ${recipeDbId}
+  `)
+
+  if (!result.length) return { main: null, secondary: [] }
+  let main = null
+  const secondary = []
+  for (const row of result[0].values) {
+    if (row[2] === 'main') {
+      main = { name: row[0], amount: row[1] }
+    } else {
+      secondary.push({ name: row[0], amount: row[1] })
+    }
+  }
+  return { main, secondary }
+}
+
 function safe(str) {
   return String(str).replace(/'/g, "''")
 }
