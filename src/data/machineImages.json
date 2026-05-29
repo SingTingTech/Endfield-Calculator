@@ -1,0 +1,14 @@
+{
+  "精炼炉": "/images/machines/item-port-furnance-1.webp",
+  "粉碎机": "/images/machines/item-port-grinder-1.webp",
+  "反应池": "/images/machines/item-port-mix-pool-1.webp",
+  "扩容反应池": "/images/machines/item-port-mix-pool-2.webp",
+  "塑形机": "/images/machines/item-port-shaper-1.webp",
+  "研磨机": "/images/machines/item-port-thickener-1.webp",
+  "种植机": "/images/machines/item-port-planter-1.webp",
+  "装备原件机": "/images/machines/item-port-winder-1.webp",
+  "天有洪炉": "/images/machines/item-port-xiranite-oven-1.webp",
+  "提纯机": "/images/machines/item-port-liquid-purifier-1.webp",
+  "拆解机": "/images/machines/item-port-dismantler-1.webp",
+  "息壤供电桩": "/images/machines/item-port-power-diffuser-2.webp"
+}
